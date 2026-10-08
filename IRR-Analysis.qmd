@@ -1,0 +1,209 @@
+---
+title: "IRR-Analyse"
+format:
+  unitue-html:
+    # Alle folgenden Optionen sind optional
+    institute: "Institut für Erziehungswissenschaft"
+    faculty: "Wirtschafts- und Sozialwissenschaftliche Fakultät"
+    github-repo: "https://github.com/sammerk/unitue-lumo"
+    particles: true           # dezentes Netz in Mattgold im Titelbereich
+    self-contained: true
+    # bg-image: "bild.jpg"      # Bildleiste unterhalb des Logos
+    # primary-color: "#0069AA"  # Akzentfarbe überschreiben
+---
+
+```{r}
+#| label: setup1
+#| include: false
+library(ggplot2)
+
+# Kategoriale Palette nach CD der Universität Tübingen (S. 34/35).
+# Reihenfolge auf Unterscheidbarkeit bei Farbsehschwäche optimiert
+# (min. ΔE2000 unter Deuter-/Prot-/Tritanopie: 4 Farben 14,3; 8 Farben 11,0).
+# Ab 5 Gruppen zusätzlich Form oder Linientyp verwenden.
+ut_palette <- c(
+  karminrot = "#A51E37", mattgold = "#B4A069", anthrazit = "#32414B",
+  blau = "#0069AA", hellblau = "#50AAC8", violett = "#AF6E96",
+  ziegel = "#C8503C", ocker = "#D29600"
+)
+scale_colour_ut <- function(...) scale_colour_manual(values = unname(ut_palette), ...)
+scale_fill_ut <- function(...) scale_fill_manual(values = unname(ut_palette), ...)
+```
+
+```{r}
+#| label: setup
+library(readxl)
+library(dplyr)
+library(readr)
+library(stringr)
+library(cluster)
+library(pheatmap)
+```
+
+## Daten
+
+```{r}
+#| label: import
+IRR_data <- read_excel("data/IRR_data.xlsx")
+```
+
+## Abgeleitete Variablen
+
+`zahl` enthält die Zahl, um die es im Item geht. Bei „Zahlzerlegung nutzen“-Items ist das bei Subtraktionen der Minuend und bei Additionen die Summe (z.B. „4 + 6“ → 10).
+
+`aufgabenform` beschreibt die Art des Items. „Streifen linear“ muss vor „Streifen“ geprüft werden.
+
+```{r}
+#| label: variablen
+IRR_data <- IRR_data |>
+  mutate(
+    aufgabenform = case_when(
+      str_detect(item_beschreibung, "Streifen linear") ~ "Streifen linear",
+      str_detect(item_beschreibung, "Blockdarstellung") ~ "Blockdarstellung",
+      str_detect(item_beschreibung, "Streifen") ~ "Streifen",
+      str_detect(item_beschreibung, "Freund") ~ "Freund",
+      str_detect(item_beschreibung, "nutzen") ~ "Zahlzerlegung nutzen"
+    ),
+    zahlen = str_extract_all(item_beschreibung, "\\d+") |> lapply(as.integer),
+    zahl = case_when(
+      aufgabenform == "Zahlzerlegung nutzen" & str_detect(item_beschreibung, "\\+") ~
+        vapply(zahlen, sum, integer(1)),
+      .default = vapply(zahlen, \(x) x[1], integer(1))
+    )
+  ) |>
+  select(-zahlen)
+
+count(IRR_data, aufgabenform, zahl)
+```
+
+## Clustered Heatmap
+
+Die Items (Zeilen) werden mit der **Gower-Distanz** geclustert, die für Datensätze mit gemischten Variablentypen konzipiert ist – hier kategoriale (`aufgabenform`, `zahl`) und metrische Kennwerte (`alpha_na`, `schiefe`, `varianz`, `mittelwert`). Für jedes Variablenpaar berechnet die Gower-Distanz einen zwischen 0 und 1 liegenden Ähnlichkeitswert und mittelt über alle Variablen:
+
+- **Kategoriale Variablen:** Zwei Items sind entweder gleich (Beitrag = 0) oder verschieden (Beitrag = 1). Bei nominalem Typ (hier `aufgabenform`) gilt das in beiden Richtungen. Bei ordinalen Typen (hier `zahl`) wird der Abstand zwischen den Rängen relativ zur Spannweite skaliert, sodass 6 und 7 näher beieinander liegen als 6 und 10.
+- **Metrische Variablen:** Der Abstand zweier Werte wird durch die Spannweite der Variable geteilt (Range-Normalisierung), sodass alle Variablen denselben maximalen Beitrag von 1 liefern. Dies ist der Standard in `cluster::daisy()`.
+
+Das Ergebnis ist eine Distanzmatrix zwischen 0 (identisch) und 1 (maximal verschieden), in der keine Variable aufgrund ihrer Maßeinheit überproportional gewichtet ist.
+
+**Average Linkage** (Unweighted Pair Group Method with Arithmetic Mean, UPGMA) beschreibt, wie die einzelnen Items zu Clustern verschmelzt werden. Bei jedem Schritt werden zwei Gruppen zusammengeführt, zwischen denen der *durchschnittliche* Abstand aller Item-Paare – eines aus der einen, eines aus der anderen Gruppe – am kleinsten ist. Im Gegensatz zur Single Linkage (nur das nächste Paar) ist Average Linkage weniger anfällig für Ketteneffekte, im Gegensatz zur Complete Linkage (nur das weiteste Paar) weniger sensitiv für Ausreißer. Die Wahl ist sinnvoll, da die Gower-Distanz keine echten euklidischen Abstände erzeugt – Ward's Method wäre hier nicht vertretbar.
+
+Hinweis: Zwei der sechs Variablen sind kategorial und gehen nur als gleich/verschieden ein. Sie haben daher ein relativ hohes Gewicht in der Distanz.
+
+```{r}
+#| label: heatmap
+#| fig-height: 7
+heat_df <- IRR_data |>
+  mutate(aufgabenform = factor(aufgabenform), zahl = factor(zahl)) |>
+  select(item_kuerzel, aufgabenform, zahl, alpha_na, schiefe, varianz, mittelwert) |>
+  as.data.frame()
+rownames(heat_df) <- heat_df$item_kuerzel
+
+gower_dist <- daisy(heat_df[, -1], metric = "gower")
+row_clust <- hclust(gower_dist, method = "average")
+
+heat_mat <- scale(as.matrix(heat_df[, c("alpha_na", "schiefe", "varianz", "mittelwert")]))
+
+# Raw (unstandardised) values as cell labels; colour shows z-values
+raw_mat <- as.matrix(heat_df[, colnames(heat_mat)])
+cell_labels <- matrix(sprintf("%.2f", raw_mat), nrow(raw_mat), dimnames = dimnames(raw_mat))
+
+col_clust <- hclust(dist(t(heat_mat)), method = "average")
+
+# CD colours: diverging blau – weiß – karminrot for z-values
+heat_colors <- colorRampPalette(c(ut_palette[["blau"]], "white", ut_palette[["karminrot"]]))(100)
+
+# Per-cell text colour (white on dark cells). pheatmap draws labels column-wise
+# in clustered order, so the vector must follow that order.
+text_col <- ifelse(abs(heat_mat) > 1.5, "white", ut_palette[["anthrazit"]])
+number_colors <- as.vector(text_col[row_clust$order, col_clust$order])
+
+# Categorical: CD palette; zahl is ordinal, so a light-to-dark gold ramp
+anno_colors <- list(
+  aufgabenform = setNames(unname(ut_palette)[seq_len(nlevels(heat_df$aufgabenform))], levels(heat_df$aufgabenform)),
+  zahl = setNames(colorRampPalette(c("#ECE6D2", ut_palette[["mattgold"]], "#5A5034"))(nlevels(heat_df$zahl)), levels(heat_df$zahl))
+)
+
+pheatmap(
+  heat_mat,
+  cluster_rows = row_clust,
+  cluster_cols = col_clust,
+  annotation_row = heat_df[c("aufgabenform", "zahl")],
+  annotation_colors = anno_colors,
+  color = heat_colors,
+  breaks = seq(-3, 3, length.out = 101),
+  display_numbers = cell_labels,
+  number_color = number_colors,
+  border_color = "white",
+  fontsize_number = 6,
+  fontsize_row = 7,
+  main = "Items: Zeilen, Farbe: z-Werte/Kategorien, Zahlen: Rohwerte"
+)
+```
+
+## Heatmap mit dichotomisiertem Alpha-Nicht-Kognitiv-Wert
+
+Der Alpha-Nicht-Kognitiv-Wert (`alpha_na`) ist ein Mass für die interne Konsistenz, der auf rein nicht-kognitiven Items (z.B. Antworttendenzen) basiert. Ein Wert von 0,6 wird in der psychometrischen Praxis häufig als Minimalgrenze für zuverlässige Skalen herangezogen. Um den Einfluss dieses Kontinuums auf die Itemstruktur zu prüfen, wird `alpha_na` hier als dichotome Variable behandelt:
+
+- **Kategorie ≤ 0,6:** Items mit geringerer nicht-kognitiver Zuverlässigkeit
+- **Kategorie > 0,6:** Items mit höherer nicht-kognitiver Trennschärfe
+
+In der Gower-Distanz geht diese dichotome Variable damit als nominale Kategorie ein (gleich vs. verschieden) und erhält denselben Beitrag wie `aufgabenform` und `zahl`. Das dient dazu, zu prüfen, ob sich Items allein auf Basis ihrer Antworttendenz-Zuverlässigkeit systematisch von solchen mit höherer Trennschärfe unterscheiden.
+
+```{r}
+#| label: heatmap2
+#| fig-height: 7
+heat_df2 <- IRR_data |>
+  mutate(
+    aufgabenform = factor(aufgabenform),
+    zahl = factor(zahl),
+    alpha_kat = if_else(alpha_na > 0.6, "> 0,6", "≤ 0,6") |> factor()
+  ) |>
+  select(item_kuerzel, aufgabenform, zahl, alpha_kat, alpha_na, schiefe, varianz, mittelwert) |>
+  as.data.frame()
+rownames(heat_df2) <- heat_df2$item_kuerzel
+
+gower_dist2 <- daisy(heat_df2[, -1], metric = "gower")
+row_clust2 <- hclust(gower_dist2, method = "average")
+
+heat_mat2 <- scale(as.matrix(heat_df2[, c("alpha_na", "schiefe", "varianz", "mittelwert")]))
+
+# Raw (unstandardised) values as cell labels; colour shows z-values
+raw_mat2 <- as.matrix(heat_df2[, colnames(heat_mat2)])
+cell_labels2 <- matrix(sprintf("%.2f", raw_mat2), nrow(raw_mat2), dimnames = dimnames(raw_mat2))
+
+col_clust2 <- hclust(dist(t(heat_mat2)), method = "average")
+
+# CD colours: diverging blau – weiss – karminrot for z-values
+heat_colors2 <- colorRampPalette(c(ut_palette[["blau"]], "white", ut_palette[["karminrot"]]))(100)
+
+# Per-cell text colour (white on dark cells). pheatmap draws labels column-wise
+# in clustered order, so the vector must follow that order.
+text_col2 <- ifelse(abs(heat_mat2) > 1.5, "white", ut_palette[["anthrazit"]])
+number_colors2 <- as.vector(text_col2[row_clust2$order, col_clust2$order])
+
+# Categorical: CD palette without mattgold (reserved for the ordinal zahl ramp);
+# alpha_kat uses karminrot/mattgold to signal the dichotomy
+anno_colors2 <- list(
+  aufgabenform = setNames(unname(ut_palette[names(ut_palette) != "mattgold"])[seq_len(nlevels(heat_df2$aufgabenform))], levels(heat_df2$aufgabenform)),
+  zahl = setNames(colorRampPalette(c("#ECE6D2", ut_palette[["mattgold"]], "#5A5034"))(nlevels(heat_df2$zahl)), levels(heat_df2$zahl)),
+  alpha_kat = setNames(c("#C8503C", "#B4A069"), c("> 0,6", "≤ 0,6"))
+)
+
+pheatmap(
+  heat_mat2,
+  cluster_rows = row_clust2,
+  cluster_cols = col_clust2,
+  annotation_row = heat_df2[c("aufgabenform", "zahl", "alpha_kat")],
+  annotation_colors = anno_colors2,
+  color = heat_colors2,
+  breaks = seq(-3, 3, length.out = 101),
+  display_numbers = cell_labels2,
+  number_color = number_colors2,
+  border_color = "white",
+  fontsize_number = 6,
+  fontsize_row = 7,
+  main = "Items: Gower-Distanz (Zeilen), z-Werte (Farbe)"
+)
+```
+
+Die zweite Heatmap enthält zusätzlich `alpha_kat` als Annotation. Ein Vergleich der beiden Dendrogramme zeigt, ob sich die Clusterstruktur ändert, wenn nicht-kognitive Zuverlässigkeit in die Itemdistanz eingeht. Ein deutlicher Einfluss würde bedeuten, dass Items mit hoher nicht-kognitiver Trennschärfe sich systematisch von solchen mit niedrigerer Trennschärfe unterscheiden – etwa weil sie häufiger aus einer bestimmten Aufgabenform stammen oder auf andere Kennwerte wie Schiefe oder Varianz absehen.
